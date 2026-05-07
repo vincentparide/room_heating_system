@@ -39,7 +39,7 @@ def build_single_pipe_tile_path(tile, entry, exit_, h, PipePartClass):
 
     pts = []
     parts = []
-    current = []
+    current = None
     current_type = None
     part_id = 0
 
@@ -47,16 +47,25 @@ def build_single_pipe_tile_path(tile, entry, exit_, h, PipePartClass):
         p = PipePoint(x, y, z)
         pts.append(p)
         typ = "bend" if is_bend else "straight"
-        if current_type is None: current_type = typ
+        if current_type is None:
+            current_type = typ
+            current = [p]
+            continue
         if typ != current_type:
+            if current_type == "bend":
+                current.append(p)
             parts.append(PipePartClass(part_id=f"{tile.tile_id}_P{part_id}", kind=current_type, tile_id=tile.tile_id, points=current))
             part_id += 1
-            current = []
-        current.append(p)
-        current_type = typ
+            current = [p] if current_type == "bend" else [current[-1], p]
+            current_type = typ
+        else:
+            current.append(p)
     if current:
         parts.append(PipePartClass(part_id=f"{tile.tile_id}_P{part_id}", kind=current_type, tile_id=tile.tile_id, points=current))
 
     pts3d = [(p.x, p.y, p.z) for p in pts]
-    pts, Tin, Tout = simulate_pipe_temperature(pts3d, h)
-    return pts, parts, Tin, Tout
+    sim_pts, Tin, Tout = simulate_pipe_temperature(pts3d, h)
+    point_map = {id(src): dst for src, dst in zip(pts, sim_pts)}
+    for part in parts:
+        part.points = [point_map[id(p)] for p in part.points]
+    return sim_pts, parts, Tin, Tout

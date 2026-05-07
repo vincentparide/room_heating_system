@@ -3,12 +3,43 @@ from geometry import tile_segments, uniq, polyline_length_xy
 from pipe_engine import build_single_pipe_tile_path, neighbor_side, simulate_pipe_temperature
 from qr_engine import pipe_qr_payload, tile_qr_payload
 
+def build_pipe_order(nx, ny):
+    if nx <= 0 or ny <= 0:
+        return []
+    if ny < 2:
+        return [(xi, 0) for xi in range(nx)]
+
+    return_y = ny - 1
+    main_ys = list(range(return_y))
+    start_upward = (nx % 2 == 1)
+    order = []
+
+    for xi in range(nx):
+        upward = start_upward if xi % 2 == 0 else not start_upward
+        ys = main_ys if upward else list(reversed(main_ys))
+        for yi in ys:
+            order.append((xi, yi))
+
+    for xi in range(nx - 1, -1, -1):
+        order.append((xi, return_y))
+
+    return order
+
+def outside_side_for(cell, nx, ny):
+    xi, yi = cell
+    if yi == ny - 1:
+        return "top"
+    if yi == 0:
+        return "bottom"
+    if xi == 0:
+        return "left"
+    if xi == nx - 1:
+        return "right"
+    return "left"
+
 def build_room_circuit(room, tiles, xsegs, ysegs, h):
     nx, ny = len(xsegs), len(ysegs)
-    order = []
-    for yi in range(ny):
-        xs = range(nx) if yi % 2 == 0 else range(nx - 1, -1, -1)
-        for xi in xs: order.append((xi, yi))
+    order = build_pipe_order(nx, ny)
 
     tile_map = {(xi, yi): tiles[yi + xi * ny] for xi in range(nx) for yi in range(ny)}
     room_pts = []
@@ -25,8 +56,8 @@ def build_room_circuit(room, tiles, xsegs, ysegs, h):
         t = tile_map[(xi, yi)]
         prev = order[k - 1] if k > 0 else None
         nxt = order[k + 1] if k < len(order) - 1 else None
-        entry = "left" if prev is None else neighbor_side(prev[0] - xi, prev[1] - yi)
-        exit_ = "right" if nxt is None else neighbor_side(nxt[0] - xi, nxt[1] - yi)
+        entry = outside_side_for((xi, yi), nx, ny) if prev is None else neighbor_side(prev[0] - xi, prev[1] - yi)
+        exit_ = outside_side_for((xi, yi), nx, ny) if nxt is None else neighbor_side(nxt[0] - xi, nxt[1] - yi)
         pts, parts, Tin, Tout = build_single_pipe_tile_path(t, entry, exit_, h, PipePart)
         
         t.pipe_points = pts

@@ -97,22 +97,6 @@ def make_int_spin(mn, mx, value, step=1):
     spin.setKeyboardTracking(False)
     spin.setValue(value)
     return spin
-def make_double_spin(mn, mx, value, step, decimals=3):
-    spin = QDoubleSpinBox()
-    spin.setDecimals(decimals)
-    spin.setRange(mn, mx)
-    spin.setSingleStep(step)
-    spin.setKeyboardTracking(False)
-    spin.setValue(value)
-    return spin
-
-def make_int_spin(mn, mx, value, step=1):
-    spin = QtWidgets.QSpinBox()
-    spin.setRange(mn, mx)
-    spin.setSingleStep(step)
-    spin.setKeyboardTracking(False)
-    spin.setValue(value)
-    return spin
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -344,7 +328,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.results_pipe.setText(
             f"Layout: {ROOM_PIPE_LAYOUT_NAME}\n"
-            f"Reference: bottom_left\n"
+            f"Return row: top tile row to outlet\n"
             f"Total room pipe length: {self.circuit.total_length_m:.2f} m\n"
             f"Room outlet temp: {self.circuit.outlet_temp_c:.1f} °C\n"
             f"Tiles crossed: {len(active_tiles)}\n"
@@ -356,15 +340,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if not tile: return
         payload = getattr(tile, "qr_payload", "")
         if payload:
-            img = make_qr(payload).resize((300, 300))
-            qimg = ImageQt(img)
+            img = make_qr(payload).resize((300, 300)).convert("RGBA")
+            qimg = QtGui.QImage(
+                img.tobytes("raw", "RGBA"),
+                img.width,
+                img.height,
+                QtGui.QImage.Format_RGBA8888
+            ).copy()
             self._current_qr_pixmap = QtGui.QPixmap.fromImage(qimg)
             self.qr_label.setPixmap(self._current_qr_pixmap)
+
+        straight_count = sum(1 for p in tile.pipe_parts if p.kind == "straight")
+        curved_count = sum(1 for p in tile.pipe_parts if p.kind == "bend")
         
         self.info_text.setPlainText(
             f"Tile: {tile.tile_id}\n"
             f"Size: {tile.x1-tile.x0:.3f} m × {tile.y1-tile.y0:.3f} m\n"
             f"Pipe layout: {ROOM_PIPE_LAYOUT_NAME}\n"
+            f"Straight pipe sections: {straight_count}\n"
+            f"Curved pipe sections: {curved_count}\n"
             f"Pipe length: {tile.pipe_length_m:.3f} m\n"
             f"Tile entry: {tile.pipe_inlet_temp_c:.2f} °C\n"
             f"Tile exit: {tile.pipe_outlet_temp_c:.2f} °C\n"

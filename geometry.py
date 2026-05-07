@@ -79,7 +79,7 @@ def round_corners_tagged(pts, r):
         else:
             while da > 0: da -= 2 * math.pi
             
-        steps = 16 
+        steps = 32
         for k in range(1, steps):
             a = a1 + da * (k / steps)
             out.append((cx + r * math.cos(a), cy + r * math.sin(a), True)) # True = Bend

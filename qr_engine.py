@@ -65,6 +65,11 @@ def tile_qr_payload(tile, room, ts, ss, h):
             {
                 "id": part.part_id,
                 "kind": part.kind,
+                "section_type": "curved" if part.kind == "bend" else "straight",
+                "point_data": [
+                    [round(p.x, 3), round(p.y, 3), round(p.z, 3), round(p.temp_c, 2)]
+                    for p in part.points
+                ],
                 "points": len(part.points)
             }
             for part in tile.pipe_parts
@@ -77,6 +82,7 @@ def pipe_qr_payload(part, h):
         "id": part.part_id,
         "tile": part.tile_id,
         "kind": part.kind,
+        "section_type": "curved" if part.kind == "bend" else "straight",
         "points": len(part.points),
         "point_data": [
             [round(p.x, 3), round(p.y, 3), round(p.z, 3), round(p.temp_c, 2)]

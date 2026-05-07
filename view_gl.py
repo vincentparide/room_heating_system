@@ -18,6 +18,8 @@ class GLRoomView(QOpenGLWidget):
         self.support_spec = None
         self.show_pipes = True
         self.temperature_colors = True
+        self._pipe_display_list = None
+        self._pipe_display_list_dirty = True
 
         self.azimuth = 45.0
         self.elevation = 30.0
@@ -35,6 +37,7 @@ class GLRoomView(QOpenGLWidget):
         self.support_spec = support_spec
         self.show_pipes = show_pipes
         self.temperature_colors = temperature_colors
+        self._pipe_display_list_dirty = True
         self.update()
         
     def initializeGL(self):
@@ -55,10 +58,7 @@ class GLRoomView(QOpenGLWidget):
         gluPerspective(45.0, w / max(h, 1), 0.05, 200.0)
         glMatrixMode(GL_MODELVIEW)
 
-    def paintGL(self):
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        glLoadIdentity()
-
+    def _apply_camera(self):
         if not self.room:
             return
 
@@ -78,6 +78,15 @@ class GLRoomView(QOpenGLWidget):
         up_z = math.cos(el)
         
         gluLookAt(cam_x, cam_y, cam_z, cx, cy, cz, up_x, up_y, up_z)
+
+    def paintGL(self):
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glLoadIdentity()
+
+        if not self.room:
+            return
+
+        self._apply_camera()
 
         # --- DRAW ORDER FOR GLASS EFFECT ---
         
@@ -198,6 +207,22 @@ class GLRoomView(QOpenGLWidget):
         return (1.0, 0.4 + 0.5 * ((r-0.66)/0.34), 0.3 - 0.2 * ((r-0.66)/0.34))
 
     def draw_pipes(self):
+        if self._pipe_display_list_dirty or self._pipe_display_list is None:
+            self._rebuild_pipe_display_list()
+        if self._pipe_display_list is not None:
+            glCallList(self._pipe_display_list)
+
+    def _rebuild_pipe_display_list(self):
+        if self._pipe_display_list is not None:
+            glDeleteLists(self._pipe_display_list, 1)
+            self._pipe_display_list = None
+        self._pipe_display_list = glGenLists(1)
+        glNewList(self._pipe_display_list, GL_COMPILE)
+        self._draw_pipes_immediate()
+        glEndList()
+        self._pipe_display_list_dirty = False
+
+    def _draw_pipes_immediate(self):
         if not self.tiles:
             return
 
@@ -271,6 +296,14 @@ class GLRoomView(QOpenGLWidget):
 
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.RightButton and self.tiles:
+            self.makeCurrent()
+            glMatrixMode(GL_PROJECTION)
+            glLoadIdentity()
+            gluPerspective(45.0, self.width() / max(self.height(), 1), 0.05, 200.0)
+            glMatrixMode(GL_MODELVIEW)
+            glLoadIdentity()
+            self._apply_camera()
+
             x = event.x()
             y = self.height() - event.y()
             model = glGetDoublev(GL_MODELVIEW_MATRIX)
@@ -279,6 +312,9 @@ class GLRoomView(QOpenGLWidget):
             near = gluUnProject(x, y, 0.0, model, proj, view)
             far = gluUnProject(x, y, 1.0, model, proj, view)
             z_plane = self.tiles[0].z1
+            if abs(far[2] - near[2]) < 1e-9:
+                self.doneCurrent()
+                return
             t = (z_plane - near[2]) / (far[2] - near[2])
             px = near[0] + (far[0] - near[0]) * t
             py = near[1] + (far[1] - near[1]) * t
@@ -287,7 +323,9 @@ class GLRoomView(QOpenGLWidget):
                     self.selected_tile = tile
                     self.tilePicked.emit(tile)
                     self.update()
+                    self.doneCurrent()
                     return
+            self.doneCurrent()
         elif event.button() == QtCore.Qt.LeftButton:
             self._last_pos = event.pos()
 
