@@ -1,4 +1,3 @@
-# layout_engine.py
 from models import Tile, Support, RoomCircuit, PipePart
 from geometry import tile_segments, uniq, polyline_length_xy
 from pipe_engine import build_single_pipe_tile_path, neighbor_side, simulate_pipe_temperature
@@ -14,7 +13,8 @@ def build_room_circuit(room, tiles, xsegs, ysegs, h):
     tile_map = {(xi, yi): tiles[yi + xi * ny] for xi in range(nx) for yi in range(ny)}
     room_pts = []
     room_parts = []
-
+    ordered_tiles = []
+    
     def append_pt(p):
         if room_pts:
             last = room_pts[-1]
@@ -28,15 +28,32 @@ def build_room_circuit(room, tiles, xsegs, ysegs, h):
         entry = "left" if prev is None else neighbor_side(prev[0] - xi, prev[1] - yi)
         exit_ = "right" if nxt is None else neighbor_side(nxt[0] - xi, nxt[1] - yi)
         pts, parts, Tin, Tout = build_single_pipe_tile_path(t, entry, exit_, h, PipePart)
+        
         t.pipe_points = pts
         t.pipe_parts = parts
         t.pipe_inlet_temp_c = Tin
         t.pipe_outlet_temp_c = Tout
         t.pipe_length_m = polyline_length_xy([(p.x, p.y) for p in pts])
+        ordered_tiles.append(t)  
         for p in pts: append_pt(p)
         room_parts.extend(parts)
 
     full_pts, Tin, Tout = simulate_pipe_temperature([(p.x, p.y, p.z) for p in room_pts], h)
+    temp_by_coord = {(round(p.x, 9), round(p.y, 9), round(p.z, 9)): p.temp_c for p in full_pts}
+
+    def apply_global_temperatures(points):
+        for p in points:
+            key = (round(p.x, 9), round(p.y, 9), round(p.z, 9))
+            if key in temp_by_coord:
+                p.temp_c = temp_by_coord[key]
+
+    for t in ordered_tiles:
+        apply_global_temperatures(t.pipe_points)
+        for part in t.pipe_parts:
+            apply_global_temperatures(part.points)
+        if t.pipe_points:
+            t.pipe_inlet_temp_c = t.pipe_points[0].temp_c
+            t.pipe_outlet_temp_c = t.pipe_points[-1].temp_c   
     return RoomCircuit(full_pts, room_parts, polyline_length_xy([(p.x, p.y) for p in full_pts]), Tin, Tout)
 
 def compute_layout(room, ts, ss, h):

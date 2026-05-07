@@ -15,6 +15,9 @@ class GLRoomView(QOpenGLWidget):
         self.supports = []
         self.pipes = []
         self.heating = None # Added to support temperature colors
+        self.support_spec = None
+        self.show_pipes = True
+        self.temperature_colors = True
 
         self.azimuth = 45.0
         self.elevation = 30.0
@@ -22,14 +25,18 @@ class GLRoomView(QOpenGLWidget):
         self._last_pos = None
         self.selected_tile = None
 
-    def set_data(self, room, tiles, supports, pipes, heating=None):
+    def set_data(self, room, tiles, supports, pipes, heating=None,
+                 support_spec=None, show_pipes=True, temperature_colors=True):
         self.room = room
         self.tiles = tiles
         self.supports = supports
         self.pipes = pipes or []
         self.heating = heating  # Save heating specs for temperature gradient
+        self.support_spec = support_spec
+        self.show_pipes = show_pipes
+        self.temperature_colors = temperature_colors
         self.update()
-
+        
     def initializeGL(self):
         glClearColor(0.07, 0.08, 0.10, 1.0)
         glEnable(GL_DEPTH_TEST)
@@ -65,8 +72,12 @@ class GLRoomView(QOpenGLWidget):
         cam_x = cx + self.distance * math.cos(el) * math.cos(az)
         cam_y = cy + self.distance * math.cos(el) * math.sin(az)
         cam_z = cz + self.distance * math.sin(el)
+
+        up_x = -math.sin(el) * math.cos(az)
+        up_y = -math.sin(el) * math.sin(az)
+        up_z = math.cos(el)
         
-        gluLookAt(cam_x, cam_y, cam_z, cx, cy, cz, 0.0, 0.0, 1.0)
+        gluLookAt(cam_x, cam_y, cam_z, cx, cy, cz, up_x, up_y, up_z)
 
         # --- DRAW ORDER FOR GLASS EFFECT ---
         
@@ -80,7 +91,7 @@ class GLRoomView(QOpenGLWidget):
         self._draw_tile_bodies()
         
         # 3. Pipes (Embedded inside)
-        if self.pipes:
+        if self.show_pipes and self.pipes:
             self.draw_pipes()
 
         # 4. Tile Tops (Transparent Glass) -> Allows seeing pipes from above
@@ -91,7 +102,9 @@ class GLRoomView(QOpenGLWidget):
 
     def _draw_ground(self):
         glDisable(GL_LIGHTING)
-        glColor3f(0.18, 0.20, 0.24)
+        glEnable(GL_BLEND)
+        glDepthMask(GL_FALSE)
+        glColor4f(0.18, 0.20, 0.24, 0.22)
         glBegin(GL_QUADS)
         pad = 1.0
         glVertex3f(-pad, -pad, 0.0)
@@ -99,8 +112,8 @@ class GLRoomView(QOpenGLWidget):
         glVertex3f(self.room.length_m + pad, self.room.width_m + pad, 0.0)
         glVertex3f(-pad, self.room.width_m + pad, 0.0)
         glEnd()
+        glDepthMask(GL_TRUE)
         glEnable(GL_LIGHTING)
-
     def _draw_axes(self):
         glDisable(GL_LIGHTING)
         glLineWidth(3.0)
@@ -113,19 +126,30 @@ class GLRoomView(QOpenGLWidget):
 
     def _draw_support(self, s):
         cx, cy = s.cx, s.cy
-        glColor3f(0.70, 0.70, 0.75)
-        # Base
-        glBegin(GL_QUADS)
-        r = 0.05
-        glVertex3f(cx-r, cy-r, 0); glVertex3f(cx+r, cy-r, 0); glVertex3f(cx+r, cy+r, 0); glVertex3f(cx-r, cy+r, 0)
-        glEnd()
-        # Column
-        glColor3f(0.55, 0.55, 0.60)
+        ss = self.support_spec
+        plate_r = ss.plate_radius_m if ss else 0.05
+        plate_h = ss.plate_height_m if ss else 0.002
+        col_r = ss.column_radius_m if ss else 0.002
+        col_h = ss.column_height_m if ss else 0.15
+        detail = max(8, int(ss.cylinder_detail if ss else 24))
+
         quad = gluNewQuadric()
-        glPushMatrix()
-        glTranslatef(cx, cy, 0)
-        gluCylinder(quad, 0.01, 0.01, 0.15, 12, 1)
-        glPopMatrix()
+
+        def draw_cylinder(z, radius, height, color):
+            glColor3f(*color)
+            glPushMatrix()
+            glTranslatef(cx, cy, z)
+            gluCylinder(quad, radius, radius, height, detail, 1)
+            gluDisk(quad, 0.0, radius, detail, 1)
+            glTranslatef(0.0, 0.0, height)
+            gluDisk(quad, 0.0, radius, detail, 1)
+            glPopMatrix()
+
+        draw_cylinder(s.z0, plate_r, plate_h, (0.70, 0.70, 0.75))
+        draw_cylinder(s.z0 + plate_h, col_r, col_h, (0.55, 0.55, 0.60))
+        draw_cylinder(s.z0 + plate_h + col_h, plate_r, plate_h, (0.70, 0.70, 0.75))
+
+        gluDeleteQuadric(quad)
 
     def _draw_tile_bodies(self):
         # Opaque Bottoms and Sides
@@ -177,9 +201,6 @@ class GLRoomView(QOpenGLWidget):
         if not self.tiles:
             return
 
-        z_top = self.tiles[0].z1
-        pipe_z = z_top - 0.01  # Inside tile (dent)
-
         # Get temperature range for gradient calculation
         # Fallback values if heating spec is missing
         t_min = self.heating.room_temp_c if self.heating else 21.0
@@ -197,19 +218,16 @@ class GLRoomView(QOpenGLWidget):
 
             glBegin(GL_LINE_STRIP)
             for p in part.points:
-                # 1. Calculate how "hot" this point is (0.0 to 1.0)
-                # 1.0 = Inlet Temp (Red), 0.0 = Room Temp (Orange)
-                ratio = (p.temp_c - t_min) / (t_max - t_min)
-                ratio = max(0.0, min(1.0, ratio))  # Clamp value
-
-                # 2. Interpolate Color
-                # Red = (1.0, 0.0, 0.0)
-                # Orange = (1.0, 0.6, 0.0)
-                # We keep Red (R) at 1.0 and vary Green (G) from 0.0 to 0.6
-                g_val = 0.6 * (1.0 - ratio)
-                
-                glColor3f(1.0, g_val, 0.0)
-                glVertex3f(p.x, p.y, pipe_z)
+                if self.temperature_colors:
+                    ratio = (p.temp_c - t_min) / max(1e-9, (t_max - t_min))
+                    ratio = max(0.0, min(1.0, ratio))
+                    g_val = 0.6 * (1.0 - ratio)
+                    glColor3f(1.0, g_val, 0.0)
+                elif part.kind == "bend":
+                    glColor3f(1.0, 0.2, 0.2)
+                else:
+                    glColor3f(0.8, 0.5, 0.1)
+                glVertex3f(p.x, p.y, p.z)
             glEnd()
 
             # Entry Point Marker (Green Dot)
@@ -218,9 +236,9 @@ class GLRoomView(QOpenGLWidget):
                 glPointSize(10)
                 glColor3f(0.0, 1.0, 0.0)
                 glBegin(GL_POINTS)
-                glVertex3f(start.x, start.y, pipe_z + 0.002)
+                glVertex3f(start.x, start.y, start.z + 0.002)
                 glEnd()
-
+                
     def _draw_tile_tops(self):
         # Transparent Top Faces (Glass Effect)
         glEnable(GL_BLEND)
@@ -277,9 +295,8 @@ class GLRoomView(QOpenGLWidget):
         if not self._last_pos: return
         dx = e.x() - self._last_pos.x()
         dy = e.y() - self._last_pos.y()
-        self.azimuth += dx * 0.4
-        self.elevation -= dy * 0.4
-        self.elevation = max(-10.0, min(85.0, self.elevation))
+        self.azimuth = (self.azimuth + dx * 0.4) % 360.0
+        self.elevation = (self.elevation - dy * 0.4) % 360.0
         self._last_pos = e.pos()
         self.update()
 

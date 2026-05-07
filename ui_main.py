@@ -1,5 +1,6 @@
 # ui_main.py
 import sys, os, json
+from collections import Counter
 from PyQt5 import QtCore, QtWidgets, QtGui
 from PyQt5.QtWidgets import QDoubleSpinBox, QComboBox, QHBoxLayout, QVBoxLayout, QFormLayout, QGroupBox, QPushButton, QLabel, QSplitter, QScrollArea, QPlainTextEdit
 from PIL.ImageQt import ImageQt
@@ -10,8 +11,10 @@ from view_gl import GLRoomView
 from qr_engine import make_qr
 from layout_engine import compute_layout
 
+ROOM_PIPE_LAYOUT_NAME = "one_pipe_per_tile_snake"
+
 # DXF Export Function (Inline for simplicity)
-def export_dxf(room, tiles, supports, circuit, filepath):
+def export_dxf(room, tiles, supports, circuit, filepath, support_spec=None):
     with open(filepath, "w") as f:
         f.write("0\nSECTION\n2\nENTITIES\n")
         L, W = room.length_m, room.width_m
@@ -27,8 +30,17 @@ def export_dxf(room, tiles, supports, circuit, filepath):
             f.write(f"0\nLINE\n8\n{layer}\n10\n{t.x1}\n20\n{t.y0}\n30\n{t.z1}\n11\n{t.x1}\n21\n{t.y1}\n31\n{t.z1}\n")
             f.write(f"0\nLINE\n8\n{layer}\n10\n{t.x1}\n20\n{t.y1}\n30\n{t.z1}\n11\n{t.x0}\n21\n{t.y1}\n31\n{t.z1}\n")
             f.write(f"0\nLINE\n8\n{layer}\n10\n{t.x0}\n20\n{t.y1}\n30\n{t.z1}\n11\n{t.x0}\n21\n{t.y0}\n31\n{t.z1}\n")
+        # Support plate positions
+        support_radius = support_spec.plate_radius_m if support_spec else 0.05
+        for s in supports:
+            f.write(f"0\nCIRCLE\n8\nSUPPORT_PLATE\n10\n{s.cx}\n20\n{s.cy}\n30\n{s.z0}\n40\n{support_radius}\n")
+        # Heating pipe center lines
+        for part in getattr(circuit, "pipe_parts", []):
+            layer = "PIPE_BEND" if part.kind == "bend" else "PIPE_STRAIGHT"
+            for p0, p1 in zip(part.points[:-1], part.points[1:]):
+                f.write(f"0\nLINE\n8\n{layer}\n10\n{p0.x}\n20\n{p0.y}\n30\n{p0.z}\n11\n{p1.x}\n21\n{p1.y}\n31\n{p1.z}\n")
         f.write("0\nENDSEC\n0\nEOF\n")
-
+        
 class UnitSpin:
     UNIT_FACTORS = {"m": 1.0, "cm": 0.01, "mm": 0.001, "in": 0.0254}
     def __init__(self, mn_m, mx_m, val_m, step_m, default_unit="m"):
@@ -38,12 +50,14 @@ class UnitSpin:
         self.spin = QDoubleSpinBox()
         self.spin.setDecimals(3)
         self.spin.setKeyboardTracking(False)
-        self.spin.setFixedWidth(115)
+        self.spin.setMinimumWidth(115)
+        self.spin.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.unit = QComboBox()
         self.unit.addItems(["m", "cm", "mm"])
-        self.unit.setFixedWidth(55)
+        self.unit.setFixedWidth(70)
         self.unit.setCurrentText(default_unit)
-        h.addWidget(self.spin)
+        self._unit = default_unit
+        h.addWidget(self.spin, 1)
         h.addWidget(self.unit)
         self.mn_m, self.mx_m, self.step_m = mn_m, mx_m, step_m
         self._apply_ranges(default_unit)
@@ -62,9 +76,43 @@ class UnitSpin:
         self.spin.setSingleStep(max(self.step_m / f, 0.001))
 
     def _on_unit_changed(self, u):
-        cur = self.value_m()
+        cur = self.spin.value() * self.UNIT_FACTORS[self._unit]
+        self._unit = u
         self._apply_ranges(u)
         self.set_value_m(cur)
+
+def make_double_spin(mn, mx, value, step, decimals=3):
+    spin = QDoubleSpinBox()
+    spin.setDecimals(decimals)
+    spin.setRange(mn, mx)
+    spin.setSingleStep(step)
+    spin.setKeyboardTracking(False)
+    spin.setValue(value)
+    return spin
+
+def make_int_spin(mn, mx, value, step=1):
+    spin = QtWidgets.QSpinBox()
+    spin.setRange(mn, mx)
+    spin.setSingleStep(step)
+    spin.setKeyboardTracking(False)
+    spin.setValue(value)
+    return spin
+def make_double_spin(mn, mx, value, step, decimals=3):
+    spin = QDoubleSpinBox()
+    spin.setDecimals(decimals)
+    spin.setRange(mn, mx)
+    spin.setSingleStep(step)
+    spin.setKeyboardTracking(False)
+    spin.setValue(value)
+    return spin
+
+def make_int_spin(mn, mx, value, step=1):
+    spin = QtWidgets.QSpinBox()
+    spin.setRange(mn, mx)
+    spin.setSingleStep(step)
+    spin.setKeyboardTracking(False)
+    spin.setValue(value)
+    return spin
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -95,30 +143,86 @@ class MainWindow(QtWidgets.QMainWindow):
         
         right_split = QSplitter(QtCore.Qt.Vertical)
         
-        # Parameters Group
+       # Parameters Group
         params_box = QGroupBox("Parameters")
-        form = QFormLayout(params_box)
-        
-        self.roomL = UnitSpin(0.1, 100.0, 5.0, 0.1, "m")
-        self.roomW = UnitSpin(0.1, 100.0, 4.0, 0.1, "m")
-        self.tileL = UnitSpin(0.05, 5.0, 0.6, 0.05, "m")
-        self.tileW = UnitSpin(0.05, 5.0, 0.6, 0.05, "m")
-        self.tileT = UnitSpin(0.001, 0.50, 0.04, 0.001, "m")
-        self.plateR = UnitSpin(0.001, 1.0, 0.05, 0.001, "cm")
-        self.plateH = UnitSpin(0.0001, 0.10, 0.002, 0.0001, "cm")
-        
+        params_layout = QVBoxLayout(params_box)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        params_layout.addLayout(form)
+
+        def add_section(title):
+            label = QLabel(f"-- {title} --")
+            label.setStyleSheet("margin-top: 8px;")
+            form.addRow(label)
+
+        self.roomL = UnitSpin(0.1, 100.0, self.room.length_m, 0.1, "m")
+        self.roomW = UnitSpin(0.1, 100.0, self.room.width_m, 0.1, "m")
+        self.tileL = UnitSpin(0.05, 5.0, self.tile.length_m, 0.05, "m")
+        self.tileW = UnitSpin(0.05, 5.0, self.tile.width_m, 0.05, "m")
+        self.tileT = UnitSpin(0.001, 0.50, self.tile.thickness_m, 0.001, "m")
+        self.plateR = UnitSpin(0.001, 1.0, self.support.plate_radius_m, 0.001, "cm")
+        self.plateH = UnitSpin(0.0001, 0.10, self.support.plate_height_m, 0.0001, "cm")
+        self.columnR = UnitSpin(0.0005, 0.50, self.support.column_radius_m, 0.0005, "cm")
+        self.columnH = UnitSpin(0.001, 2.0, self.support.column_height_m, 0.001, "cm")
+
+        self.pipeLayout = QComboBox()
+        self.pipeLayout.addItems(["meander", ROOM_PIPE_LAYOUT_NAME])
+        self.pipeLayout.setCurrentText(self.heating.pipe_layout)
+        self.pipeLayout.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.pipeD = UnitSpin(0.001, 0.10, self.heating.pipe_outer_diameter_m, 0.001, "mm")
+        self.pipeSpacing = UnitSpin(0.01, 1.0, self.heating.pipe_spacing_m, 0.01, "cm")
+        self.edgeCover = UnitSpin(0.0, 1.0, self.heating.edge_cover_m, 0.005, "cm")
+        self.topCover = UnitSpin(0.0, 0.50, self.heating.top_cover_m, 0.001, "mm")
+        self.supplyTemp = make_double_spin(-50.0, 150.0, self.heating.inlet_temp_c, 0.5, 1)
+        self.roomTemp = make_double_spin(-50.0, 80.0, self.heating.room_temp_c, 0.5, 1)
+        self.lossCoeff = make_double_spin(0.0, 10.0, self.heating.heat_loss_per_m_k, 0.01, 3)
+        self.cylinderDetail = make_int_spin(8, 96, self.support.cylinder_detail, 1)
+        self.showPipes = QtWidgets.QCheckBox("Show pipes")
+        self.showPipes.setChecked(True)
+        self.tempColors = QtWidgets.QCheckBox("Temperature colors")
+        self.tempColors.setChecked(True)
+        self.showPipes.stateChanged.connect(self.refresh_view_options)
+        self.tempColors.stateChanged.connect(self.refresh_view_options)
+
         btn_update = QPushButton("GENERATE / UPDATE")
         btn_update.clicked.connect(self.apply_and_regenerate)
-        
+
         form.addRow("Room length (X):", self.roomL.widget)
         form.addRow("Room width (Y):", self.roomW.widget)
+        add_section("Tiles")
         form.addRow("Tile length (X):", self.tileL.widget)
         form.addRow("Tile width (Y):", self.tileW.widget)
         form.addRow("Tile thickness (Z):", self.tileT.widget)
+        add_section("Supports")
         form.addRow("Plate radius:", self.plateR.widget)
         form.addRow("Plate height:", self.plateH.widget)
+        form.addRow("Column radius:", self.columnR.widget)
+        form.addRow("Column height:", self.columnH.widget)
+        add_section("Heating")
+        form.addRow("Pipe layout:", self.pipeLayout)
+        form.addRow("Pipe outer diameter:", self.pipeD.widget)
+        form.addRow("Pipe spacing:", self.pipeSpacing.widget)
+        form.addRow("Edge cover:", self.edgeCover.widget)
+        form.addRow("Top cover:", self.topCover.widget)
+        form.addRow("Supply temp (°C):", self.supplyTemp)
+        form.addRow("Room temp (°C):", self.roomTemp)
+        form.addRow("Loss coeff (/m):", self.lossCoeff)
+        form.addRow("Cylinder detail:", self.cylinderDetail)
+        form.addRow(self.showPipes)
+        form.addRow(self.tempColors)
         form.addRow(btn_update)
-        
+
+        add_section("Results")
+        self.results_tiles = QLabel()
+        self.results_pipe = QLabel()
+        self.results_supports = QLabel()
+        for label in (self.results_tiles, self.results_pipe, self.results_supports):
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        form.addRow("Tiles (by size):", self.results_tiles)
+        form.addRow("Pipe summary:", self.results_pipe)
+        form.addRow("Total supports:", self.results_supports)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(params_box)
@@ -129,17 +233,21 @@ class MainWindow(QtWidgets.QMainWindow):
         qr_layout = QVBoxLayout(qr_box)
         
         self.qr_label = QLabel("Right-click a tile\nto show its QR")
-        self.qr_label.setFixedSize(250, 250)
+        self.qr_label.setMinimumHeight(300)
+        self.qr_label.setMaximumHeight(320)
+        self.qr_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.qr_label.setAlignment(QtCore.Qt.AlignCenter)
         self.qr_label.setStyleSheet("background:white;border:1px solid black;")
         
         self.btn_save_qr = QPushButton("Save shown QR...")
         self.btn_export_dxf = QPushButton("Export full layout to CAD (DXF)...")
+        self.btn_save_qr.clicked.connect(self.save_current_qr)
         self.btn_export_dxf.clicked.connect(self.export_dxf)
         
         self.info_text = QPlainTextEdit()
         self.info_text.setReadOnly(True)
         self.info_text.setPlaceholderText("Tile heating details appear here...")
+        self.info_text.setMinimumHeight(110)
         
         qr_layout.addWidget(self.qr_label)
         qr_layout.addWidget(self.btn_save_qr)
@@ -147,6 +255,9 @@ class MainWindow(QtWidgets.QMainWindow):
         qr_layout.addWidget(self.info_text)
         
         right_split.addWidget(qr_box)
+        right_split.setSizes([500, 380])
+        right_split.setStretchFactor(0, 1)
+        right_split.setStretchFactor(1, 0)
         right_layout.addWidget(right_split)
         
         splitter.addWidget(right_panel)
@@ -164,6 +275,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tile.thickness_m = self.tileT.value_m()
         self.support.plate_radius_m = self.plateR.value_m()
         self.support.plate_height_m = self.plateH.value_m()
+        self.support.column_radius_m = self.columnR.value_m()
+        self.support.column_height_m = self.columnH.value_m()
+        self.support.cylinder_detail = self.cylinderDetail.value()
+        self.heating.pipe_layout = self.pipeLayout.currentText()
+        self.heating.pipe_outer_diameter_m = self.pipeD.value_m()
+        self.heating.pipe_spacing_m = self.pipeSpacing.value_m()
+        self.heating.edge_cover_m = self.edgeCover.value_m()
+        self.heating.top_cover_m = self.topCover.value_m()
+        self.heating.inlet_temp_c = self.supplyTemp.value()
+        self.heating.room_temp_c = self.roomTemp.value()
+        self.heating.heat_loss_per_m_k = self.lossCoeff.value()
         
         tiles, supports, z0, z1, circuit = compute_layout(self.room, self.tile, self.support, self.heating)
         
@@ -171,26 +293,96 @@ class MainWindow(QtWidgets.QMainWindow):
         self.supports = supports
         self.circuit = circuit
         
-        self.view.set_data(self.room, tiles, supports, circuit.pipe_parts, self.heating)
+        self.view.set_data(
+            self.room,
+            tiles,
+            supports,
+            circuit.pipe_parts,
+            self.heating,
+            self.support,
+            self.showPipes.isChecked(),
+            self.tempColors.isChecked()
+        )
+        self.update_results()
+
+    def refresh_view_options(self):
+        if not hasattr(self, "tiles"):
+            return
+        self.view.set_data(
+            self.room,
+            self.tiles,
+            self.supports,
+            self.circuit.pipe_parts,
+            self.heating,
+            self.support,
+            self.showPipes.isChecked(),
+            self.tempColors.isChecked()
+        )
+
+    def update_results(self):
+        if not getattr(self, "tiles", None):
+            self.results_tiles.setText("")
+            self.results_pipe.setText("")
+            self.results_supports.setText("0")
+            return
+
+        counts = Counter()
+        for tile in self.tiles:
+            dx = round(tile.x1 - tile.x0, 3)
+            dy = round(tile.y1 - tile.y0, 3)
+            counts[(min(dx, dy), max(dx, dy))] += 1
+
+        tile_lines = []
+        for (a, b), count in sorted(counts.items(), key=lambda item: (-item[1], item[0][0], item[0][1])):
+            tile_lines.append(f"{count} × {a:.3f} m × {b:.3f} m")
+        self.results_tiles.setText("\n".join(tile_lines))
+
+        active_tiles = [t for t in self.tiles if t.pipe_length_m > 1e-9]
+        avg_out = 0.0
+        if active_tiles:
+            avg_out = sum(t.pipe_outlet_temp_c for t in active_tiles) / len(active_tiles)
+
+        self.results_pipe.setText(
+            f"Layout: {ROOM_PIPE_LAYOUT_NAME}\n"
+            f"Reference: bottom_left\n"
+            f"Total room pipe length: {self.circuit.total_length_m:.2f} m\n"
+            f"Room outlet temp: {self.circuit.outlet_temp_c:.1f} °C\n"
+            f"Tiles crossed: {len(active_tiles)}\n"
+            f"Average active-tile outlet temp: {avg_out:.1f} °C"
+        )
+        self.results_supports.setText(str(len(self.supports)))
 
     def on_tile_picked(self, tile):
         if not tile: return
         payload = getattr(tile, "qr_payload", "")
         if payload:
-            img = make_qr(payload).resize((250, 250))
+            img = make_qr(payload).resize((300, 300))
             qimg = ImageQt(img)
             self._current_qr_pixmap = QtGui.QPixmap.fromImage(qimg)
             self.qr_label.setPixmap(self._current_qr_pixmap)
         
         self.info_text.setPlainText(
             f"Tile: {tile.tile_id}\n"
-            f"Size: {tile.x1-tile.x0:.3f} x {tile.y1-tile.y0:.3f}\n"
+            f"Size: {tile.x1-tile.x0:.3f} m × {tile.y1-tile.y0:.3f} m\n"
+            f"Pipe layout: {ROOM_PIPE_LAYOUT_NAME}\n"
             f"Pipe length: {tile.pipe_length_m:.3f} m\n"
-            f"Temp In: {tile.pipe_inlet_temp_c:.1f} C\n"
-            f"Temp Out: {tile.pipe_outlet_temp_c:.1f} C"
+            f"Tile entry: {tile.pipe_inlet_temp_c:.2f} °C\n"
+            f"Tile exit: {tile.pipe_outlet_temp_c:.2f} °C\n"
+            f"Room inlet: {self.circuit.inlet_temp_c:.2f} °C\n"
+            f"Room outlet: {self.circuit.outlet_temp_c:.2f} °C"
         )
+
+    def save_current_qr(self):
+        if not self._current_qr_pixmap:
+            QtWidgets.QMessageBox.information(self, "Save QR", "Right-click a tile first to show its QR code.")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save QR", "tile_qr.png", "PNG (*.png)")
+        if path:
+            if not path.lower().endswith(".png"):
+                path += ".png"
+            self._current_qr_pixmap.save(path, "PNG")
 
     def export_dxf(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export DXF", "layout.dxf", "DXF (*.dxf)")
         if path:
-            export_dxf(self.room, self.tiles, self.supports, self.circuit, path)
+            export_dxf(self.room, self.tiles, self.supports, self.circuit, path, self.support)

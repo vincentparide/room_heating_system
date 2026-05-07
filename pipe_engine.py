@@ -1,4 +1,3 @@
-# pipe_engine.py
 import math
 from geometry import round_corners_tagged
 from models import PipePoint, PipePart
@@ -11,7 +10,8 @@ def neighbor_side(dx, dy):
     return "left"
 
 def side_mid(tile, side, z):
-    cx, cy = 0.5 * (tile.x0 + tile.x1), 0.5 * (tile.y0 + tile.y1)
+    cx = 0.5 * (tile.x0 + tile.x1)
+    cy = 0.5 * (tile.y0 + tile.y1)
     if side == "left": return (tile.x0, cy, z)
     if side == "right": return (tile.x1, cy, z)
     if side == "bottom": return (cx, tile.y0, z)
@@ -32,6 +32,7 @@ def build_single_pipe_tile_path(tile, entry, exit_, h, PipePartClass):
     p_in = side_mid(tile, entry, z)
     p_out = side_mid(tile, exit_, z)
     p_mid = (0.5 * (tile.x0 + tile.x1), 0.5 * (tile.y0 + tile.y1), z)
+
     base = [(p_in[0], p_in[1]), (p_mid[0], p_mid[1]), (p_out[0], p_out[1])]
     r = h.bend_radius_factor * (0.5 * h.pipe_outer_diameter_m)
     tagged = round_corners_tagged(base, r)
