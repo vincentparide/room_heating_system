@@ -2,6 +2,22 @@ import math
 from geometry import round_corners_tagged
 from models import PipePoint, PipePart
 
+
+def pipe_temperature_at_distance(distance_m, total_length_m, h):
+    total = max(float(total_length_m), 1e-9)
+    fraction = min(max(float(distance_m) / total, 0.0), 1.0)
+    supply_temp = float(getattr(h, "inlet_temp_c", 45.0))
+    return_temp = float(getattr(h, "return_temp_c", supply_temp - getattr(h, "water_delta_t_k", 7.0)))
+    room_temp = float(getattr(h, "room_temp_c", 21.0))
+    supply_excess = supply_temp - room_temp
+    return_excess = return_temp - room_temp
+    if supply_excess <= 1e-9 or return_excess <= 1e-9:
+        return supply_temp + (return_temp - supply_temp) * fraction
+
+    decay_factor = max(math.log(supply_excess / return_excess), 1e-9)
+    return room_temp + supply_excess * math.exp(-decay_factor * fraction)
+
+
 def neighbor_side(dx, dy):
     if dx == -1: return "left"
     if dx == 1: return "right"
@@ -21,11 +37,16 @@ def simulate_pipe_temperature(points3d, h):
     if not points3d: return [], h.inlet_temp_c, h.inlet_temp_c
     out = []
     total = 0.0
+    segment_lengths = []
     for i, p in enumerate(points3d):
-        if i > 0: total += math.dist(points3d[i - 1], p)
-        temp = h.room_temp_c + (h.inlet_temp_c - h.room_temp_c) * math.exp(-h.heat_loss_per_m_k * total)
+        if i > 0:
+            total += math.dist(points3d[i - 1], p)
+        segment_lengths.append(total)
+
+    for p, distance in zip(points3d, segment_lengths):
+        temp = pipe_temperature_at_distance(distance, total, h)
         out.append(PipePoint(p[0], p[1], p[2], temp))
-    return out, h.inlet_temp_c, out[-1].temp_c
+    return out, out[0].temp_c, out[-1].temp_c
 
 def build_single_pipe_tile_path(tile, entry, exit_, h, PipePartClass):
     z = tile.z1 - h.top_cover_m - 0.5 * h.pipe_outer_diameter_m

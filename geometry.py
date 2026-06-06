@@ -1,12 +1,103 @@
 import math
 
-def tile_segments(total, size):
+
+def _manual_partial_widths(leftover, placement, offset):
+    if leftover <= 1e-6:
+        return []
+    if placement in ("center", "split"):
+        first = 0.5 * leftover
+        return [first, leftover - first]
+    if placement in ("custom", "manual"):
+        first = max(0.0, min(float(offset), leftover))
+        widths = []
+        if first > 1e-6:
+            widths.append(first)
+        if leftover - first > 1e-6:
+            widths.append(leftover - first)
+        return widths
+    return [leftover]
+
+
+def _default_partial_positions(full_count, placement, count):
+    if count <= 0:
+        return []
+    if placement in ("start", "left", "bottom"):
+        positions = [0]
+    elif placement in ("center", "split"):
+        positions = [0, full_count]
+    else:
+        positions = [full_count]
+    while len(positions) < count:
+        positions.append(full_count)
+    return positions[:count]
+
+
+def tile_segments(total, size, placement="end", offset=0.0, partial_positions=None):
+    total = max(float(total), 0.0)
+    size = max(float(size), 1e-9)
+    if total <= 1e-9:
+        return []
+
+    full_count = int(math.floor((total + 1e-9) / size))
+    while full_count > 0 and full_count * size > total + 1e-9:
+        full_count -= 1
+    leftover = max(total - full_count * size, 0.0)
+    if full_count <= 0:
+        return [(0.0, total, True)]
+
+    if placement == "manual" and leftover > 1e-6:
+        widths = _manual_partial_widths(leftover, placement, offset)
+        positions = list(partial_positions or [])
+        defaults = _default_partial_positions(full_count, placement, len(widths))
+        while len(positions) < len(widths):
+            positions.append(defaults[len(positions)])
+        positions = [max(0, min(full_count, int(round(p)))) for p in positions[:len(widths)]]
+
+        by_position = {}
+        for width, position in zip(widths, positions):
+            if width > 1e-6:
+                by_position.setdefault(position, []).append(width)
+
+        segs = []
+        x = 0.0
+        for i in range(full_count + 1):
+            for width in by_position.get(i, []):
+                x2 = min(x + width, total)
+                if x2 - x > 1e-6:
+                    segs.append((x, x2, True))
+                x = x2
+            if i < full_count:
+                x2 = min(x + size, total)
+                if x2 - x > 1e-6:
+                    segs.append((x, x2, abs((x2 - x) - size) > 1e-6))
+                x = x2
+        return segs
+
+    if leftover <= 1e-6:
+        leading = 0.0
+    elif placement in ("start", "left", "bottom"):
+        leading = leftover
+    elif placement in ("center", "split"):
+        leading = 0.5 * leftover
+    elif placement == "custom":
+        leading = max(0.0, min(float(offset), leftover))
+    else:
+        leading = 0.0
+
     segs = []
     x = 0.0
-    while x < total:
+    if leading > 1e-6:
+        segs.append((0.0, leading, True))
+        x = leading
+
+    for _ in range(full_count):
         x2 = min(x + size, total)
-        segs.append((x, x2, abs((x2 - x) - size) > 1e-6))
-        x += size
+        if x2 - x > 1e-6:
+            segs.append((x, x2, abs((x2 - x) - size) > 1e-6))
+        x = x2
+
+    if total - x > 1e-6:
+        segs.append((x, total, True))
     return segs
 
 def uniq(vals, tol=1e-9):
@@ -54,8 +145,10 @@ def round_corners_tagged(pts, r):
             out.append((p1[0], p1[1], False))
             continue
 
-        trim = r * math.tan(ang / 2.0)
+        tangent = math.tan(ang / 2.0)
+        trim = r * tangent
         trim = min(trim, min(L1, L2) * 0.45)
+        arc_r = trim / tangent if abs(tangent) > 1e-12 else r
 
         t1 = (p1[0] - u1[0] * trim, p1[1] - u1[1] * trim)
         t2 = (p1[0] + u2[0] * trim, p1[1] + u2[1] * trim)
@@ -67,8 +160,8 @@ def round_corners_tagged(pts, r):
         n1 = (-u1[1], u1[0])
         if cr < 0: n1 = (-n1[0], -n1[1])
         
-        cx = t1[0] + n1[0] * r
-        cy = t1[1] + n1[1] * r
+        cx = t1[0] + n1[0] * arc_r
+        cy = t1[1] + n1[1] * arc_r
         
         a1 = math.atan2(t1[1] - cy, t1[0] - cx)
         a2 = math.atan2(t2[1] - cy, t2[0] - cx)
@@ -79,10 +172,10 @@ def round_corners_tagged(pts, r):
         else:
             while da > 0: da -= 2 * math.pi
             
-        steps = 32
+        steps = max(16, int(64 * abs(da) / math.pi))
         for k in range(1, steps):
             a = a1 + da * (k / steps)
-            out.append((cx + r * math.cos(a), cy + r * math.sin(a), True)) # True = Bend
+            out.append((cx + arc_r * math.cos(a), cy + arc_r * math.sin(a), True)) # True = Bend
 
         out.append((t2[0], t2[1], False))
 
